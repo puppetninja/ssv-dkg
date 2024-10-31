@@ -142,7 +142,7 @@ var StartResigning = &cobra.Command{
 		}
 		operatorIDs, err := cli_utils.StringSliceToUintArray(flags.OperatorIDs)
 		if err != nil {
-			logger.Fatal("😥 Failed to load participants: ", zap.Error(err))
+			logger.Fatal("😥 Failed to load operator IDs: ", zap.Error(err))
 		}
 		ethNetwork := e2m_core.NetworkFromString(flags.Network)
 		if ethNetwork == "" {

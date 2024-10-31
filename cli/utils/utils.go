@@ -35,7 +35,7 @@ func StringSliceToUintArray(flagdata []string) ([]uint64, error) {
 	for i := 0; i < len(flagdata); i++ {
 		opid, err := strconv.ParseUint(flagdata[i], 10, strconv.IntSize)
 		if err != nil {
-			return nil, fmt.Errorf("😥 cant load operator err: %v , data: %v, ", err, flagdata[i])
+			return nil, fmt.Errorf("err: %w , data: %v, ", err, flagdata[i])
 		}
 		partsarr = append(partsarr, opid)
 	}

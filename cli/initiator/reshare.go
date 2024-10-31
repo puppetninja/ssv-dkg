@@ -148,11 +148,11 @@ var StartReshare = &cobra.Command{
 		}
 		oldOperatorIDs, err := cli_utils.StringSliceToUintArray(flags.OperatorIDs)
 		if err != nil {
-			logger.Fatal("😥 Failed to load participants: ", zap.Error(err))
+			logger.Fatal("😥 Failed to load old operator IDs: ", zap.Error(err))
 		}
 		newOperatorIDs, err := cli_utils.StringSliceToUintArray(flags.NewOperatorIDs)
 		if err != nil {
-			logger.Fatal("😥 Failed to load new participants: ", zap.Error(err))
+			logger.Fatal("😥 Failed to load new operator IDs: ", zap.Error(err))
 		}
 		// create a new ID for resharing
 		id := spec.NewID()

@@ -87,7 +87,6 @@ func GetThreshold[S ~[]E, E any](ids S) int {
 }
 
 func WriteErrorResponse(logger *zap.Logger, writer http.ResponseWriter, err error, statusCode int) {
-	logger.Error("request error: " + err.Error())
 	writer.WriteHeader(statusCode)
 	presentedErr := err
 
@@ -99,7 +98,7 @@ func WriteErrorResponse(logger *zap.Logger, writer http.ResponseWriter, err erro
 
 	_, writeErr := writer.Write(wire.MakeErr(presentedErr))
 	if writeErr != nil {
-		logger.Error("error writing error response: " + writeErr.Error())
+		logger.Error("error writing error response", zap.Error(writeErr))
 	}
 }
 
