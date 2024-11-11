@@ -14,10 +14,11 @@ import (
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	eth2_key_manager_core "github.com/bloxapp/eth2-key-manager/core"
+	kyber_bls12381 "github.com/drand/kyber-bls12381"
+	kyber_dkg "github.com/drand/kyber/share/dkg"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/herumi/bls-eth-go-binary/bls"
 	"github.com/imroc/req/v3"
-	"go.uber.org/zap"
 
 	spec "github.com/ssvlabs/dkg-spec"
 	spec_crypto "github.com/ssvlabs/dkg-spec/crypto"
@@ -25,6 +26,7 @@ import (
 	"github.com/ssvlabs/ssv-dkg/pkgs/crypto"
 	"github.com/ssvlabs/ssv-dkg/pkgs/utils"
 	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
+	"go.uber.org/zap"
 )
 
 type VerifyMessageSignatureFunc func(pub *rsa.PublicKey, msg, sig []byte) error
@@ -442,7 +444,7 @@ func (c *Initiator) CreateCeremonyResults(
 	nonce uint64,
 	amount phase0.Gwei,
 ) (*wire.DepositDataCLI, *wire.KeySharesCLI, []*wire.SignedProof, error) {
-	dkgResults, err := parseDKGResultsFromBytes(resultsBytes)
+	dkgResults, err := c.parseDKGResultsFromBytes(resultsBytes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -580,7 +582,7 @@ func (c *Initiator) processDKGResultResponse(dkgResults []*spec.Result,
 	return depositDataJson, keyshares, nil
 }
 
-func parseDKGResultsFromBytes(responseResult [][]byte) (dkgResults []*spec.Result, finalErr error) {
+func (c *Initiator) parseDKGResultsFromBytes(responseResult [][]byte) (dkgResults []*spec.Result, finalErr error) {
 	for i := 0; i < len(responseResult); i++ {
 		msg := responseResult[i]
 		tsp := &wire.SignedTransport{}
@@ -588,12 +590,8 @@ func parseDKGResultsFromBytes(responseResult [][]byte) (dkgResults []*spec.Resul
 			finalErr = errors.Join(finalErr, err)
 			continue
 		}
-		if tsp.Message.Type == wire.ErrorMessageType {
-			finalErr = errors.Join(finalErr, fmt.Errorf("%s", string(tsp.Message.Data)))
-			continue
-		}
-		if tsp.Message.Type != wire.OutputMessageType {
-			finalErr = errors.Join(finalErr, fmt.Errorf("wrong DKG result message type: exp %s, got %s ", wire.OutputMessageType.String(), tsp.Message.Type.String()))
+		if err := verifyMessageType(tsp, wire.OutputMessageType); err != nil {
+			finalErr = errors.Join(finalErr, err)
 			continue
 		}
 		result := &spec.Result{}
@@ -786,8 +784,8 @@ func (c *Initiator) processPongMessage(res wire.PongResult) error {
 		return fmt.Errorf("operator returned error: %s", errString)
 	}
 	// Validate that incoming message is an pong message
-	if signedPongMsg.Message.Type != wire.PongMessageType {
-		return fmt.Errorf("wrong incoming message type from operator")
+	if err := verifyMessageType(signedPongMsg, wire.PongMessageType); err != nil {
+		return err
 	}
 	pong := &wire.Pong{}
 	if err := pong.UnmarshalSSZ(signedPongMsg.Message.Data); err != nil {
@@ -931,7 +929,7 @@ func (c *Initiator) createBulkResults(resultsBytes [][][]byte, signedMsg, msgIDM
 	bulkKeyShares := []*wire.KeySharesCLI{}
 	bulkProofs := [][]*wire.SignedProof{}
 	for _, ceremonyResult := range resultsBytes {
-		dkgResults, err := parseDKGResultsFromBytes(ceremonyResult)
+		dkgResults, err := c.parseDKGResultsFromBytes(ceremonyResult)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -971,3 +969,34 @@ func (c *Initiator) createBulkResults(resultsBytes [][][]byte, signedMsg, msgIDM
 	return bulkDepositData, bulkKeyShares, bulkProofs, nil
 }
 
+func verifyMessageType(tsp *wire.SignedTransport, expectedType wire.TransportType) error {
+	if tsp.Message.Type != expectedType {
+		if tsp.Message.Type == wire.ErrorMessageType {
+			return fmt.Errorf("dkg protocol failed with %s", string(tsp.Message.Data))
+		}
+		if tsp.Message.Type == wire.KyberMessageType {
+			kyberMsg := &wire.KyberMessage{}
+			if err := kyberMsg.UnmarshalSSZ(tsp.Message.Data); err != nil {
+				return err
+			}
+			switch kyberMsg.Type {
+			// if we are not in fastsync, we expect only complaints
+			case wire.KyberResponseBundleMessageType:
+				bundle, err := wire.DecodeResponseBundle(kyberMsg.Data)
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("dkg protocol failed with response complaints: %v", bundle)
+			case wire.KyberJustificationBundleMessageType:
+				bundle, err := wire.DecodeJustificationBundle(kyberMsg.Data, kyber_bls12381.NewBLS12381Suite().G1().(kyber_dkg.Suite))
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("dkg protocol failed with justification message, which is unexpected: %v", bundle)
+			default:
+				return fmt.Errorf("received message with wrong type %s ", kyberMsg.Type)
+			}
+		}
+	}
+	return nil
+}
