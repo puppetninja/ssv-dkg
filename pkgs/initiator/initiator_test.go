@@ -9,10 +9,8 @@ import (
 	"testing"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
-	"github.com/bloxapp/eth2-key-manager/core"
 	"github.com/bloxapp/ssv/logging"
 	kyber_bls12381 "github.com/drand/kyber-bls12381"
-	"github.com/drand/kyber/share/dkg"
 	kyber_dkg "github.com/drand/kyber/share/dkg"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -333,7 +331,7 @@ func TestRemoveTrailSlash(t *testing.T) {
 
 func TestDepositDataSigningAndVerification(t *testing.T) {
 	tests := []struct {
-		network                       core.Network
+		network                       e2m_core.Network
 		testname                      string
 		validatorPubKey               []byte
 		validatorPrivKey              []byte
@@ -345,7 +343,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 	}{
 		{
 			testname:                      "valid mainnet deposit",
-			network:                       core.MainNetwork,
+			network:                       e2m_core.MainNetwork,
 			validatorPubKey:               must(hex.DecodeString("b3d50de8d77299da8d830de1edfb34d3ce03c1941846e73870bb33f6de7b8a01383f6b32f55a1d038a4ddcb21a765194")),
 			validatorPrivKey:              must(hex.DecodeString("175db1c5411459893301c3f2ebe740e5da07db8f17c2df4fa0be6d31a48a4f79")),
 			withdrawalPubKey:              must(hex.DecodeString("8d176708b908f288cc0e9d43f75674e73c0db94026822c5ce2c3e0f9e773c9ee95fdba824302f1208c225b0ed2d54154")),
@@ -356,7 +354,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 		},
 		{
 			testname:                      "invalid mainnet deposit",
-			network:                       core.MainNetwork,
+			network:                       e2m_core.MainNetwork,
 			validatorPubKey:               must(hex.DecodeString("b3d50de8d77299da8d830de1edfb34d3ce03c1941846e73870bb33f6de7b8a01383f6b32f55a1d038a4ddcb21a765194")),
 			validatorPrivKey:              must(hex.DecodeString("165db1c5411459893301c3f2ebe740e5da07db8f17c2df4fa0be6d31a48a4f79")),
 			withdrawalPubKey:              must(hex.DecodeString("8d176708b908f288cc0e9d43f75674e73c0db94026822c5ce2c3e0f9e773c9ee95fdba824302f1208c225b0ed2d54154")),
@@ -367,7 +365,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 		},
 		{
 			testname:                      "valid prater deposit",
-			network:                       core.PraterNetwork,
+			network:                       e2m_core.PraterNetwork,
 			validatorPubKey:               must(hex.DecodeString("b3d50de8d77299da8d830de1edfb34d3ce03c1941846e73870bb33f6de7b8a01383f6b32f55a1d038a4ddcb21a765194")),
 			validatorPrivKey:              must(hex.DecodeString("175db1c5411459893301c3f2ebe740e5da07db8f17c2df4fa0be6d31a48a4f79")),
 			withdrawalPubKey:              must(hex.DecodeString("8d176708b908f288cc0e9d43f75674e73c0db94026822c5ce2c3e0f9e773c9ee95fdba824302f1208c225b0ed2d54154")),
@@ -378,7 +376,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, core.InitBLS())
+	require.NoError(t, e2m_core.InitBLS())
 
 	for _, test := range tests {
 		t.Run(test.testname, func(t *testing.T) {
@@ -489,7 +487,7 @@ func TestDKGFailWithOperatorsMisbehave(t *testing.T) {
 		cheatDealShare, err := hex.DecodeString("a262a2a96d170658f68cf2450106949e92b9c415c3add2dbb8ce1a09886cf24f12f4f2ff1043b372090b06ce9a328a6f64b4279125902a244a22aa4ae30e16249186b1ae3a2c2c6a29634215a84e86fae66862013d8db1cdc930a8b1502750d8")
 		require.NoError(t, err)
 		d.Deals[0].EncryptedShare = cheatDealShare
-		bundle := &dkg.DealBundle{
+		bundle := &kyber_dkg.DealBundle{
 			DealerIndex: d.DealerIndex,
 			Deals:       d.Deals,
 			Public:      d.Public,
