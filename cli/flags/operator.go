@@ -3,7 +3,6 @@ package flags
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -72,27 +71,27 @@ func BindOperatorFlags(cmd *cobra.Command) error {
 	}
 	PrivKey = filepath.Clean(viper.GetString("privKey"))
 	PrivKeyPassword = filepath.Clean(viper.GetString("privKeyPassword"))
-	if strings.Contains(PrivKey, "..") {
-		return fmt.Errorf("😥 Failed to get private key path flag value")
+	if !filepath.IsLocal(PrivKey) {
+		return fmt.Errorf("😥 wrong key path flag value, should be local")
 	}
-	if strings.Contains(PrivKeyPassword, "..") {
-		return fmt.Errorf("😥 Failed to get password for private key flag value")
+	if !filepath.IsLocal(PrivKeyPassword) {
+		return fmt.Errorf("😥 wrong password for private key flag value, should be local")
 	}
 	Port = viper.GetUint64("port")
 	if Port == 0 {
-		return fmt.Errorf("😥 Wrong port provided")
+		return fmt.Errorf("😥 wrong port provided")
 	}
 	OperatorID = viper.GetUint64("operatorID")
 	if OperatorID == 0 {
-		return fmt.Errorf("😥 Wrong operator ID provided")
+		return fmt.Errorf("😥 wrong operator ID provided")
 	}
 	ServerTLSCertPath = filepath.Clean(viper.GetString("serverTLSCertPath"))
-	if strings.Contains(ServerTLSCertPath, "..") {
-		return fmt.Errorf("😥 wrong serverTLSCertPath flag")
+	if !filepath.IsLocal(ServerTLSCertPath) {
+		return fmt.Errorf("😥 wrong serverTLSCertPath flag, should be local")
 	}
 	ServerTLSKeyPath = filepath.Clean(viper.GetString("serverTLSKeyPath"))
-	if strings.Contains(ServerTLSKeyPath, "..") {
-		return fmt.Errorf("😥 wrong serverTLSKeyPath flag")
+	if !filepath.IsLocal(ServerTLSKeyPath) {
+		return fmt.Errorf("😥 wrong serverTLSKeyPath flag, should be local")
 	}
 	EthEndpointURL = viper.GetString("ethEndpointURL")
 	if !cli_utils.IsUrl(EthEndpointURL) {
@@ -123,12 +122,12 @@ func OperatorIDFlag(c *cobra.Command) {
 
 // ServerTLSCertPath sets path to server TLS certificate
 func SetServerTLSCertPath(c *cobra.Command) {
-	AddPersistentStringFlag(c, serverTLSCertPath, "/ssl/tls.crt", "Path to server TLS certificate", false)
+	AddPersistentStringFlag(c, serverTLSCertPath, "./ssl/tls.crt", "Path to server TLS certificate", false)
 }
 
 // ServerTLSKeyPath sets path to server server TLS private key
 func SetServerTLSKeyPath(c *cobra.Command) {
-	AddPersistentStringFlag(c, serverTLSKeyPath, "/ssl/tls.key", "Path to server TLS private key", false)
+	AddPersistentStringFlag(c, serverTLSKeyPath, "./ssl/tls.key", "Path to server TLS private key", false)
 }
 
 // SetEthEndpointURL

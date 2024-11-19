@@ -3,7 +3,6 @@ package flags
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/spf13/cobra"
@@ -87,7 +86,7 @@ func BindGenerateResignMsgFlags(cmd *cobra.Command) error {
 	if OperatorsInfoPath == "" && OperatorsInfo == "" {
 		return fmt.Errorf("😥 operators info should be provided either as a raw JSON string, or path to a file")
 	}
-	if OperatorsInfoPath != "" && strings.Contains(OperatorsInfoPath, "..") {
+	if OperatorsInfoPath != "" && !filepath.IsLocal(OperatorsInfoPath) {
 		return fmt.Errorf("😥 wrong operatorsInfoPath flag")
 	}
 	owner := viper.GetString("owner")
@@ -110,8 +109,8 @@ func BindGenerateResignMsgFlags(cmd *cobra.Command) error {
 	if ProofsFilePath != "" && ProofsString != "" {
 		return fmt.Errorf("😥 proofs can be provided either as a string, or path to a file, not both")
 	}
-	if ProofsFilePath != "" && strings.Contains(ProofsFilePath, "..") {
-		return fmt.Errorf("😥 wrong proofsFilePath flag")
+	if !filepath.IsLocal(ProofsFilePath) {
+		return fmt.Errorf("😥 wrong proofsFilePath flag, should be local")
 	}
 	withdrawAddr := viper.GetString("withdrawAddress")
 	if withdrawAddr == "" {
@@ -158,8 +157,8 @@ func BindResigningFlags(cmd *cobra.Command) error {
 			return fmt.Errorf("😥 TLS CA certs path should be provided, overwise set 'TLSInsecure' flag to true")
 		} else {
 			for _, certPath := range ClientCACertPath {
-				if strings.Contains(filepath.Clean(certPath), "..") {
-					return fmt.Errorf("😥 wrong clientCACertPath flag, should not contain '..' path traversal")
+				if !filepath.IsLocal(certPath) {
+					return fmt.Errorf("😥 wrong clientCACertPath flag, should be local")
 				}
 			}
 		}
