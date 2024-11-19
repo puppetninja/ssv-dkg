@@ -13,27 +13,29 @@ import (
 	"time"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
+	"github.com/bloxapp/ssv/logging"
+	"github.com/bloxapp/ssv/utils/rsaencryption"
 	kyber_bls12381 "github.com/drand/kyber-bls12381"
 	"github.com/drand/kyber/share"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/herumi/bls-eth-go-binary/bls"
 	"github.com/imroc/req/v3"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	cli_utils "github.com/bloxapp/ssv-dkg/cli/utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/consts"
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/initiator"
-	"github.com/bloxapp/ssv-dkg/pkgs/operator"
-	"github.com/bloxapp/ssv-dkg/pkgs/utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/utils/test_utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
-	"github.com/bloxapp/ssv/logging"
-	"github.com/bloxapp/ssv/utils/rsaencryption"
+	spec "github.com/ssvlabs/dkg-spec"
+	spec_crypto "github.com/ssvlabs/dkg-spec/crypto"
+	"github.com/ssvlabs/dkg-spec/testing/stubs"
+	cli_utils "github.com/ssvlabs/ssv-dkg/cli/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/consts"
+	"github.com/ssvlabs/ssv-dkg/pkgs/crypto"
+	"github.com/ssvlabs/ssv-dkg/pkgs/initiator"
+	"github.com/ssvlabs/ssv-dkg/pkgs/operator"
+	"github.com/ssvlabs/ssv-dkg/pkgs/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/utils/test_utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
-
-const examplePath = "../../examples/"
 
 var (
 	rootCert     = []string{"../../integration_test/certs/rootCA.crt"}
@@ -43,47 +45,58 @@ var (
 
 func TestRateLimit(t *testing.T) {
 	version := "test.version"
-	srv := test_utils.CreateTestOperatorFromFile(t, 1, examplePath, version, operatorCert, operatorKey)
+	stubClient := &stubs.Client{
+		CallContractF: func(call ethereum.CallMsg) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	ops := wire.OperatorsCLI{}
+	srv1 := test_utils.CreateTestOperatorFromFile(t, 1, "../../examples/operator1", version, operatorCert, operatorKey, stubClient)
+	srv2 := test_utils.CreateTestOperatorFromFile(t, 2, "../../examples/operator2", version, operatorCert, operatorKey, stubClient)
+	srv3 := test_utils.CreateTestOperatorFromFile(t, 3, "../../examples/operator3", version, operatorCert, operatorKey, stubClient)
+	srv4 := test_utils.CreateTestOperatorFromFile(t, 4, "../../examples/operator4", version, operatorCert, operatorKey, stubClient)
+	ops = append(
+		ops,
+		wire.OperatorCLI{Addr: srv1.HttpSrv.URL, ID: 1, PubKey: &srv1.PrivKey.PublicKey},
+		wire.OperatorCLI{Addr: srv2.HttpSrv.URL, ID: 2, PubKey: &srv2.PrivKey.PublicKey},
+		wire.OperatorCLI{Addr: srv3.HttpSrv.URL, ID: 3, PubKey: &srv3.PrivKey.PublicKey},
+		wire.OperatorCLI{Addr: srv4.HttpSrv.URL, ID: 4, PubKey: &srv4.PrivKey.PublicKey},
+	)
 	// Initiator priv key
 	_, pv, err := rsaencryption.GenerateKeys()
 	require.NoError(t, err)
 	priv, err := rsaencryption.ConvertPemToPrivateKey(string(pv))
 	require.NoError(t, err)
 	pubKey := priv.Public().(*rsa.PublicKey)
-	initPubBytes, err := crypto.EncodeRSAPublicKey(pubKey)
+	initPubBytes, err := spec_crypto.EncodeRSAPublicKey(pubKey)
 	require.NoError(t, err)
 	t.Run("test /init rate limit", func(t *testing.T) {
-		ops := wire.OperatorsCLI{}
-		ops = append(ops, wire.OperatorCLI{Addr: srv.HttpSrv.URL, ID: 1, PubKey: &srv.PrivKey.PublicKey})
-
-		parts := make([]*wire.Operator, 0)
-		for _, id := range []uint64{1} {
+		parts := make([]*spec.Operator, 0)
+		for _, id := range []uint64{1, 2, 3, 4} {
 			op := ops.ByID(id)
-			if op == nil {
-				t.Fatalf("no op")
-			}
-			pkBytes, err := crypto.EncodeRSAPublicKey(op.PubKey)
+			pkBytes, err := spec_crypto.EncodeRSAPublicKey(op.PubKey)
 			require.NoError(t, err)
-			parts = append(parts, &wire.Operator{
+			parts = append(parts, &spec.Operator{
 				ID:     op.ID,
 				PubKey: pkBytes,
 			})
 		}
 
-		init := &wire.Init{
+		init := &spec.Init{
 			Operators:             parts,
 			T:                     3,
 			WithdrawalCredentials: common.HexToAddress("0x0000000000000000000000000000000000000009").Bytes(),
 			Fork:                  [4]byte{0, 0, 0, 0},
 			Owner:                 common.HexToAddress("0x0000000000000000000000000000000000000007"),
 			Nonce:                 0,
+			Amount:                uint64(spec_crypto.MIN_ACTIVATION_BALANCE),
 		}
 		sszinit, err := init.MarshalSSZ()
 		require.NoError(t, err)
 
 		ts := &wire.Transport{
 			Type:       wire.InitMessageType,
-			Identifier: [24]byte{},
+			Identifier: [24]byte{1, 1, 1, 1, 1},
 			Data:       sszinit,
 			Version:    []byte(version),
 		}
@@ -91,7 +104,7 @@ func TestRateLimit(t *testing.T) {
 		tsssz, err := ts.MarshalSSZ()
 		require.NoError(t, err)
 
-		sig, err := crypto.SignRSA(priv, tsssz)
+		sig, err := spec_crypto.SignRSA(priv, tsssz)
 		require.NoError(t, err)
 
 		signedTransportMsg := &wire.SignedTransport{
@@ -118,7 +131,7 @@ func TestRateLimit(t *testing.T) {
 			defer close(errChan)
 			defer wg.Done()
 			for i := 0; i < 1000; i++ {
-				res, err := r.Post(fmt.Sprintf("%v/%v", srv.HttpSrv.URL, "init"))
+				res, err := r.Post(fmt.Sprintf("%v/%v", srv1.HttpSrv.URL, "init"))
 				require.NoError(t, err)
 				if res.Status == "429 Too Many Requests" {
 					b, err := io.ReadAll(res.Body)
@@ -137,8 +150,45 @@ func TestRateLimit(t *testing.T) {
 		client := req.C()
 		client.SetRootCertsFromFile(rootCert...)
 		r := client.R()
+		exchMsg := wire.Exchange{
+			PK:      []byte{},
+			Commits: []byte{},
+		}
+		sszExch, err := exchMsg.MarshalSSZ()
+		require.NoError(t, err)
+		ts := &wire.Transport{
+			Type:       wire.ExchangeMessageType,
+			Identifier: [24]byte{1, 1, 1, 1, 1},
+			Data:       sszExch,
+			Version:    []byte(version),
+		}
+		tsssz, err := ts.MarshalSSZ()
+		require.NoError(t, err)
 
-		r.SetBodyBytes([]byte{})
+		sig, err := spec_crypto.SignRSA(priv, tsssz)
+		require.NoError(t, err)
+
+		signedTransportMsg := &wire.SignedTransport{
+			Message:   ts,
+			Signer:    initPubBytes,
+			Signature: sig,
+		}
+		signedTransportMsgEnc, err := signedTransportMsg.MarshalSSZ()
+		require.NoError(t, err)
+		var allMsgsBytes []byte
+		allMsgsBytes = append(allMsgsBytes, signedTransportMsgEnc...)
+		// sign message by initiator
+		sigMultMsg, err := spec_crypto.SignRSA(priv, allMsgsBytes)
+		require.NoError(t, err)
+		multSignedTransport := &wire.MultipleSignedTransports{
+			Identifier: [24]byte{1, 1, 1, 1, 1},
+			Messages:   []*wire.SignedTransport{signedTransportMsg},
+			Signature:  sigMultMsg,
+		}
+		msg, err := multSignedTransport.MarshalSSZ()
+		require.NoError(t, err)
+
+		r.SetBodyBytes(msg)
 
 		// Send requests
 		errChan := make(chan []byte)
@@ -149,7 +199,7 @@ func TestRateLimit(t *testing.T) {
 			defer close(errChan)
 			defer wg.Done()
 			for i := 0; i < 1000; i++ {
-				res, err := r.Post(fmt.Sprintf("%v/%v", srv.HttpSrv.URL, "dkg"))
+				res, err := r.Post(fmt.Sprintf("%v/%v", srv1.HttpSrv.URL, "dkg"))
 				require.NoError(t, err)
 				if res.Status == "429 Too Many Requests" {
 					b, err := io.ReadAll(res.Body)
@@ -164,7 +214,10 @@ func TestRateLimit(t *testing.T) {
 		}
 		wg.Wait()
 	})
-	srv.HttpSrv.Close()
+	srv1.HttpSrv.Close()
+	srv2.HttpSrv.Close()
+	srv3.HttpSrv.Close()
+	srv4.HttpSrv.Close()
 }
 
 func TestWrongInitiatorSignature(t *testing.T) {
@@ -173,10 +226,15 @@ func TestWrongInitiatorSignature(t *testing.T) {
 	logger := zap.L().Named("operator-tests")
 	ops := wire.OperatorsCLI{}
 	version := "test.version"
-	srv1 := test_utils.CreateTestOperatorFromFile(t, 1, examplePath, version, operatorCert, operatorKey)
-	srv2 := test_utils.CreateTestOperatorFromFile(t, 2, examplePath, version, operatorCert, operatorKey)
-	srv3 := test_utils.CreateTestOperatorFromFile(t, 3, examplePath, version, operatorCert, operatorKey)
-	srv4 := test_utils.CreateTestOperatorFromFile(t, 4, examplePath, version, operatorCert, operatorKey)
+	stubClient := &stubs.Client{
+		CallContractF: func(call ethereum.CallMsg) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	srv1 := test_utils.CreateTestOperatorFromFile(t, 1, "../../examples/operator1", version, operatorCert, operatorKey, stubClient)
+	srv2 := test_utils.CreateTestOperatorFromFile(t, 2, "../../examples/operator2", version, operatorCert, operatorKey, stubClient)
+	srv3 := test_utils.CreateTestOperatorFromFile(t, 3, "../../examples/operator3", version, operatorCert, operatorKey, stubClient)
+	srv4 := test_utils.CreateTestOperatorFromFile(t, 4, "../../examples/operator4", version, operatorCert, operatorKey, stubClient)
 	ops = append(
 		ops,
 		wire.OperatorCLI{Addr: srv1.HttpSrv.URL, ID: 1, PubKey: &srv1.PrivKey.PublicKey},
@@ -189,36 +247,37 @@ func TestWrongInitiatorSignature(t *testing.T) {
 		owner := common.HexToAddress("0x0000000000000000000000000000000000000007")
 		ids := []uint64{1, 2, 3, 4}
 
-		c, err := initiator.New(ops, logger, version, rootCert)
+		c, err := initiator.New(ops, logger, version, rootCert, false)
 		require.NoError(t, err)
 		// compute threshold (3f+1)
-		threshold := len(ids) - ((len(ids) - 1) / 3)
-		parts := make([]*wire.Operator, 0)
+		threshold := utils.GetThreshold(ids)
+		parts := make([]*spec.Operator, 0)
 		for _, id := range ids {
 			op := c.Operators.ByID(id)
 			require.NotNil(t, op)
-			pkBytes, err := crypto.EncodeRSAPublicKey(op.PubKey)
+			pkBytes, err := spec_crypto.EncodeRSAPublicKey(op.PubKey)
 			require.NoError(t, err)
-			parts = append(parts, &wire.Operator{
+			parts = append(parts, &spec.Operator{
 				ID:     op.ID,
 				PubKey: pkBytes,
 			})
 		}
-		wrongPub, err := crypto.EncodeRSAPublicKey(&c.PrivateKey.PublicKey)
+		wrongPub, err := spec_crypto.EncodeRSAPublicKey(&c.PrivateKey.PublicKey)
 		require.NoError(t, err)
-		encPub, err := crypto.EncodeRSAPublicKey(&c.PrivateKey.PublicKey)
+		encPub, err := spec_crypto.EncodeRSAPublicKey(&c.PrivateKey.PublicKey)
 		require.NoError(t, err)
 		c.Logger.Info("Initiator", zap.String("Pubkey:", fmt.Sprintf("%x", encPub)))
 		// make init message
-		init := &wire.Init{
+		init := &spec.Init{
 			Operators:             parts,
 			T:                     uint64(threshold),
 			WithdrawalCredentials: withdraw.Bytes(),
 			Fork:                  [4]byte{0, 0, 0, 0},
 			Owner:                 owner,
 			Nonce:                 0,
+			Amount:                uint64(spec_crypto.MIN_ACTIVATION_BALANCE),
 		}
-		id := crypto.NewID()
+		id := spec.NewID()
 		sszinit, err := init.MarshalSSZ()
 		require.NoError(t, err)
 		initMessage := &wire.Transport{
@@ -236,19 +295,7 @@ func TestWrongInitiatorSignature(t *testing.T) {
 			Signature: sig}
 		signedInitMsgBts, err := signedInitMsg.MarshalSSZ()
 		require.NoError(t, err)
-		results, err := c.SendToAll(consts.API_INIT_URL, signedInitMsgBts, parts, false)
-		require.NoError(t, err)
-		var errs []error
-		for i := 0; i < len(results); i++ {
-			msg := results[i]
-			tsp := &wire.SignedTransport{}
-			if err := tsp.UnmarshalSSZ(msg); err != nil {
-				// try parsing an error
-				errmsg, parseErr := wire.ParseAsError(msg)
-				require.NoError(t, parseErr)
-				errs = append(errs, errmsg)
-			}
-		}
+		_, errs := c.SendToAll(consts.API_INIT_URL, signedInitMsgBts, parts)
 		require.Equal(t, 4, len(errs))
 		for _, err := range errs {
 			require.ErrorContains(t, err, "init: initiator signature isn't valid: crypto/rsa: verification error")
@@ -341,8 +388,8 @@ func TestRecoverSharesData(t *testing.T) {
 		require.NoError(t, err)
 		// Find operator ID by PubKey
 		var operatorID uint64
-		for _, op := range ks.Shares[0].Operators {
-			b, err := crypto.EncodeRSAPublicKey(&priv.PublicKey)
+		for _, op := range ks.Shares[0].ShareData.Operators {
+			b, err := spec_crypto.EncodeRSAPublicKey(&priv.PublicKey)
 			require.NoError(t, err)
 			if bytes.Equal(b, []byte(op.PubKey)) {
 				operatorID = op.ID
@@ -386,9 +433,9 @@ func TestRecoverSharesData(t *testing.T) {
 	}
 	secretPoly, err := share.RecoverPriPoly(suite.G1(), kyberPrivShares, 3, operatorCount)
 	coefs := secretPoly.Coefficients()
-	t.Logf("Ploly len %d", len(coefs))
+	t.Logf("Poly len %d", len(coefs))
 	for _, c := range coefs {
-		t.Logf("Ploly coef %s", c.String())
+		t.Logf("Poly coef %s", c.String())
 	}
 	require.NoError(t, err)
 	pubPoly := secretPoly.Commit(nil)
@@ -410,7 +457,7 @@ func TestRecoverSharesData(t *testing.T) {
 	public := suite.G1().Point().Mul(secret, nil)
 
 	pk := &bls.PublicKey{}
-	err = pk.DeserializeHexStr(strings.Trim(ks.Shares[0].PublicKey, "0x"))
+	err = pk.DeserializeHexStr(strings.Trim(ks.Shares[0].ShareData.PublicKey, "0x"))
 	require.NoError(t, err)
 	bytsPK, err := public.MarshalBinary()
 	require.NoError(t, err)

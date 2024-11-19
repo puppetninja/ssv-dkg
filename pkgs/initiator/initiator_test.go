@@ -9,17 +9,25 @@ import (
 	"testing"
 
 	"github.com/attestantio/go-eth2-client/spec/phase0"
+	e2m_core "github.com/bloxapp/eth2-key-manager/core"
+	"github.com/bloxapp/ssv/logging"
+	kyber_bls12381 "github.com/drand/kyber-bls12381"
+	kyber_dkg "github.com/drand/kyber/share/dkg"
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/herumi/bls-eth-go-binary/bls"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/bloxapp/eth2-key-manager/core"
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/initiator"
-	"github.com/bloxapp/ssv-dkg/pkgs/utils/test_utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
-	"github.com/bloxapp/ssv/logging"
+	spec "github.com/ssvlabs/dkg-spec"
+	spec_crypto "github.com/ssvlabs/dkg-spec/crypto"
+	"github.com/ssvlabs/dkg-spec/testing/stubs"
+	"github.com/ssvlabs/ssv-dkg/pkgs/crypto"
+	"github.com/ssvlabs/ssv-dkg/pkgs/initiator"
+	"github.com/ssvlabs/ssv-dkg/pkgs/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/utils/test_utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/validator"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
 
 var (
@@ -51,18 +59,21 @@ var jsonStr = []byte(`[
   }
 ]`)
 
-const examplePath = "../../examples/"
-
 func TestStartDKG(t *testing.T) {
 	err := logging.SetGlobalLogger("debug", "capital", "console", nil)
 	require.NoError(t, err)
 	logger := zap.L().Named("operator-tests")
 	ops := wire.OperatorsCLI{}
 	version := "test.version"
-	srv1 := test_utils.CreateTestOperatorFromFile(t, 1, examplePath, version, operatorCert, operatorKey)
-	srv2 := test_utils.CreateTestOperatorFromFile(t, 2, examplePath, version, operatorCert, operatorKey)
-	srv3 := test_utils.CreateTestOperatorFromFile(t, 3, examplePath, version, operatorCert, operatorKey)
-	srv4 := test_utils.CreateTestOperatorFromFile(t, 4, examplePath, version, operatorCert, operatorKey)
+	stubClient := &stubs.Client{
+		CallContractF: func(call ethereum.CallMsg) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	srv1 := test_utils.CreateTestOperatorFromFile(t, 1, "../../examples/operator1", version, operatorCert, operatorKey, stubClient)
+	srv2 := test_utils.CreateTestOperatorFromFile(t, 2, "../../examples/operator2", version, operatorCert, operatorKey, stubClient)
+	srv3 := test_utils.CreateTestOperatorFromFile(t, 3, "../../examples/operator3", version, operatorCert, operatorKey, stubClient)
+	srv4 := test_utils.CreateTestOperatorFromFile(t, 4, "../../examples/operator4", version, operatorCert, operatorKey, stubClient)
 	ops = append(
 		ops,
 		wire.OperatorCLI{Addr: srv1.HttpSrv.URL, ID: 1, PubKey: &srv1.PrivKey.PublicKey},
@@ -73,35 +84,33 @@ func TestStartDKG(t *testing.T) {
 	withdraw := common.HexToAddress("0x0000000000000000000000000000000000000009")
 	owner := common.HexToAddress("0x0000000000000000000000000000000000000007")
 	t.Run("happy flow", func(t *testing.T) {
-		intr, err := initiator.New(ops, logger, "test.version", rootCert)
+		intr, err := initiator.New(ops, logger, "test.version", rootCert, false)
 		require.NoError(t, err)
-		id := crypto.NewID()
-		depositData, keyshares, _, err := intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3, 4}, "mainnet", owner, 0)
+		id := spec.NewID()
+		depositData, keyshares, proofs, err := intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3, 4}, "mainnet", owner, 0, uint64(spec_crypto.MIN_ACTIVATION_BALANCE))
 		require.NoError(t, err)
-		err = test_utils.VerifySharesData([]uint64{1, 2, 3, 4}, []*rsa.PrivateKey{srv1.PrivKey, srv2.PrivKey, srv3.PrivKey, srv4.PrivKey}, keyshares, owner, 0)
-		require.NoError(t, err)
-		err = crypto.ValidateDepositDataCLI(depositData, withdraw)
+		err = validator.ValidateResults([]*wire.DepositDataCLI{depositData}, keyshares, [][]*wire.SignedProof{proofs}, 1, owner, 0, withdraw)
 		require.NoError(t, err)
 	})
 	t.Run("test wrong amount of opeators < 4", func(t *testing.T) {
-		intr, err := initiator.New(ops, logger, "test.version", rootCert)
+		intr, err := initiator.New(ops, logger, "test.version", rootCert, false)
 		require.NoError(t, err)
-		id := crypto.NewID()
-		_, _, _, err = intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3}, "mainnet", owner, 0)
-		require.ErrorContains(t, err, "wrong operators len: < 4")
+		id := spec.NewID()
+		_, _, _, err = intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3}, "mainnet", owner, 0, uint64(spec_crypto.MIN_ACTIVATION_BALANCE))
+		require.ErrorContains(t, err, "amount of operators should be 4,7,10,13: got 3")
 	})
 	t.Run("test wrong amount of opeators > 13", func(t *testing.T) {
-		intr, err := initiator.New(ops, logger, "test.version", rootCert)
+		intr, err := initiator.New(ops, logger, "test.version", rootCert, false)
 		require.NoError(t, err)
-		id := crypto.NewID()
-		_, _, _, err = intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, "prater", owner, 0)
-		require.ErrorContains(t, err, "wrong operators len: > 13")
+		id := spec.NewID()
+		_, _, _, err = intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, "prater", owner, 0, uint64(spec_crypto.MIN_ACTIVATION_BALANCE))
+		require.ErrorContains(t, err, "amount of operators should be 4,7,10,13: got 14")
 	})
 	t.Run("test opeators not unique", func(t *testing.T) {
-		intr, err := initiator.New(ops, logger, "test.version", rootCert)
+		intr, err := initiator.New(ops, logger, "test.version", rootCert, false)
 		require.NoError(t, err)
-		id := crypto.NewID()
-		_, _, _, err = intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3, 4, 5, 6, 7, 7, 9, 10, 11, 12, 12}, "holesky", owner, 0)
+		id := spec.NewID()
+		_, _, _, err = intr.StartDKG(id, withdraw.Bytes(), []uint64{1, 2, 3, 4, 5, 6, 7, 7, 9, 10, 11, 12, 12}, "holesky", owner, 0, uint64(spec_crypto.MIN_ACTIVATION_BALANCE))
 		require.ErrorContains(t, err, "operator is not in given operator data list")
 	})
 
@@ -118,7 +127,7 @@ func TestLoadOperators(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, ops, 4)
 		require.Equal(t, ops[3].Addr, "http://localhost:3033", "addr not equal")
-		key3, err := crypto.ParseRSAPublicKey([]byte("LS0tLS1CRUdJTiBSU0EgUFVCTElDIEtFWS0tLS0tCk1JSUJJakFOQmdrcWhraUc5dzBCQVFFRkFBT0NBUThBTUlJQkNnS0NBUUVBdlFhZlo0ODJQYXRsYnRrOVdIb2MKZDBWdWNWWDk4QUlzenAvazlFTlYyQU82SVhQUXVqU1BtdUZrQTlibThsSllnWTJPb0lQU0RmK1JHWGNMc2R0VApzdEJhQ2JPL0pMOFlSejk4NURKejhBRlhDU0J3bW5mbzROSFptUjJGMVdMTE5CS2wzdVQ5Q1VLbC9RUnpKRFF1CjNNYVJ6eE5FVmdONWtvU1Nid0NxVDNDSCtjam5QU0pIeGhiaTNTaldOSnJFb3ZRUmN3ZUlpYXRrZEdVNWJOUkoKUW1LVldhYzhzVklYN2NDNE54V2RDNG1VM1RPK2Vlei90N2xVcnhSNjdnb21TbGdwaU5weFJ1M2dFajRkSWpINwpsZDlTYW1ObEJPeHV5N0lFMEJpdm5nSUdIKzVwcXZVTXhoM0N5WkVtMjFHd3JTRFhqcVpwWG92OEUwQkQ5eGY4ClN3SURBUUFCCi0tLS0tRU5EIFJTQSBQVUJMSUMgS0VZLS0tLS0K"))
+		key3, err := spec_crypto.ParseRSAPublicKey([]byte("LS0tLS1CRUdJTiBSU0EgUFVCTElDIEtFWS0tLS0tCk1JSUJJakFOQmdrcWhraUc5dzBCQVFFRkFBT0NBUThBTUlJQkNnS0NBUUVBdlFhZlo0ODJQYXRsYnRrOVdIb2MKZDBWdWNWWDk4QUlzenAvazlFTlYyQU82SVhQUXVqU1BtdUZrQTlibThsSllnWTJPb0lQU0RmK1JHWGNMc2R0VApzdEJhQ2JPL0pMOFlSejk4NURKejhBRlhDU0J3bW5mbzROSFptUjJGMVdMTE5CS2wzdVQ5Q1VLbC9RUnpKRFF1CjNNYVJ6eE5FVmdONWtvU1Nid0NxVDNDSCtjam5QU0pIeGhiaTNTaldOSnJFb3ZRUmN3ZUlpYXRrZEdVNWJOUkoKUW1LVldhYzhzVklYN2NDNE54V2RDNG1VM1RPK2Vlei90N2xVcnhSNjdnb21TbGdwaU5weFJ1M2dFajRkSWpINwpsZDlTYW1ObEJPeHV5N0lFMEJpdm5nSUdIKzVwcXZVTXhoM0N5WkVtMjFHd3JTRFhqcVpwWG92OEUwQkQ5eGY4ClN3SURBUUFCCi0tLS0tRU5EIFJTQSBQVUJMSUMgS0VZLS0tLS0K"))
 		require.NoError(t, err)
 		require.True(t, ops[2].PubKey.Equal(key3), "pubkey not equal")
 	})
@@ -142,7 +151,7 @@ func TestLoadOperators(t *testing.T) {
         "ip": "wrongURL"
       }
     ]`), &ops)
-		require.ErrorContains(t, err, "invalid operator URL")
+		require.ErrorContains(t, err, "invalid operator 1 URL")
 	})
 }
 
@@ -178,49 +187,49 @@ func TestValidateDKGParams(t *testing.T) {
 			ids:     []uint64{1, 2, 3},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "wrong operators len: < 4",
+			errMsg:  "amount of operators should be 4,7,10,13: got 3",
 		},
 		{
 			name:    "not valid number of operators",
 			ids:     []uint64{1, 2, 3, 4, 5},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "amount of operators should be 4,7,10,13: got [1 2 3 4 5]",
+			errMsg:  "amount of operators should be 4,7,10,13: got 5",
 		},
 		{
 			name:    "not valid number of operators",
 			ids:     []uint64{1, 2, 3, 4, 5, 6, 7, 8},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "amount of operators should be 4,7,10,13: got [1 2 3 4 5 6 7 8]",
+			errMsg:  "amount of operators should be 4,7,10,13: got 8",
 		},
 		{
 			name:    "not valid number of operators",
 			ids:     []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "amount of operators should be 4,7,10,13: got [1 2 3 4 5 6 7 8 9]",
+			errMsg:  "amount of operators should be 4,7,10,13: got 9",
 		},
 		{
 			name:    "not valid number of operators",
 			ids:     []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "amount of operators should be 4,7,10,13: got [1 2 3 4 5 6 7 8 9 10 11]",
+			errMsg:  "amount of operators should be 4,7,10,13: got 11",
 		},
 		{
 			name:    "not valid number of operators",
 			ids:     []uint64{1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "amount of operators should be 4,7,10,13: got [1 2 3 4 5 7 8 9 10 11 12]",
+			errMsg:  "amount of operators should be 4,7,10,13: got 11",
 		},
 		{
 			name:    "more than 13 operators",
 			ids:     []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
 			ops:     nil, // doesn't matter should fail before
 			wantErr: true,
-			errMsg:  "wrong operators len: > 13",
+			errMsg:  "amount of operators should be 4,7,10,13: got 14",
 		},
 		{
 			name:    "duplicate operators",
@@ -279,7 +288,7 @@ func TestValidateDKGParams(t *testing.T) {
 					t.Errorf("expected error message %q but got %q", tt.errMsg, err.Error())
 				}
 			case err != nil:
-				t.Errorf("unexpected error: %v", err)
+				t.Errorf("unexpected error: %s", err)
 			default:
 				// verify list is ok
 				need := len(tt.ids)
@@ -322,7 +331,7 @@ func TestRemoveTrailSlash(t *testing.T) {
 
 func TestDepositDataSigningAndVerification(t *testing.T) {
 	tests := []struct {
-		network                       core.Network
+		network                       e2m_core.Network
 		testname                      string
 		validatorPubKey               []byte
 		validatorPrivKey              []byte
@@ -334,7 +343,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 	}{
 		{
 			testname:                      "valid mainnet deposit",
-			network:                       core.MainNetwork,
+			network:                       e2m_core.MainNetwork,
 			validatorPubKey:               must(hex.DecodeString("b3d50de8d77299da8d830de1edfb34d3ce03c1941846e73870bb33f6de7b8a01383f6b32f55a1d038a4ddcb21a765194")),
 			validatorPrivKey:              must(hex.DecodeString("175db1c5411459893301c3f2ebe740e5da07db8f17c2df4fa0be6d31a48a4f79")),
 			withdrawalPubKey:              must(hex.DecodeString("8d176708b908f288cc0e9d43f75674e73c0db94026822c5ce2c3e0f9e773c9ee95fdba824302f1208c225b0ed2d54154")),
@@ -345,7 +354,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 		},
 		{
 			testname:                      "invalid mainnet deposit",
-			network:                       core.MainNetwork,
+			network:                       e2m_core.MainNetwork,
 			validatorPubKey:               must(hex.DecodeString("b3d50de8d77299da8d830de1edfb34d3ce03c1941846e73870bb33f6de7b8a01383f6b32f55a1d038a4ddcb21a765194")),
 			validatorPrivKey:              must(hex.DecodeString("165db1c5411459893301c3f2ebe740e5da07db8f17c2df4fa0be6d31a48a4f79")),
 			withdrawalPubKey:              must(hex.DecodeString("8d176708b908f288cc0e9d43f75674e73c0db94026822c5ce2c3e0f9e773c9ee95fdba824302f1208c225b0ed2d54154")),
@@ -356,7 +365,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 		},
 		{
 			testname:                      "valid prater deposit",
-			network:                       core.PraterNetwork,
+			network:                       e2m_core.PraterNetwork,
 			validatorPubKey:               must(hex.DecodeString("b3d50de8d77299da8d830de1edfb34d3ce03c1941846e73870bb33f6de7b8a01383f6b32f55a1d038a4ddcb21a765194")),
 			validatorPrivKey:              must(hex.DecodeString("175db1c5411459893301c3f2ebe740e5da07db8f17c2df4fa0be6d31a48a4f79")),
 			withdrawalPubKey:              must(hex.DecodeString("8d176708b908f288cc0e9d43f75674e73c0db94026822c5ce2c3e0f9e773c9ee95fdba824302f1208c225b0ed2d54154")),
@@ -367,7 +376,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, core.InitBLS())
+	require.NoError(t, e2m_core.InitBLS())
 
 	for _, test := range tests {
 		t.Run(test.testname, func(t *testing.T) {
@@ -382,7 +391,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 				&phase0.DepositMessage{
 					PublicKey:             phase0.BLSPubKey(test.validatorPubKey),
 					WithdrawalCredentials: crypto.BLSWithdrawalCredentials(test.withdrawalPubKey),
-					Amount:                crypto.MaxEffectiveBalanceInGwei,
+					Amount:                spec_crypto.MIN_ACTIVATION_BALANCE,
 				},
 			)
 			require.NoError(t, err)
@@ -399,7 +408,7 @@ func TestDepositDataSigningAndVerification(t *testing.T) {
 
 			require.Equal(t, sk.GetPublicKey().SerializeToHexStr(), depositDataCLI.PubKey, "0x")
 			require.Equal(t, test.expectedWithdrawalCredentials, depositData.WithdrawalCredentials)
-			require.Equal(t, crypto.MaxEffectiveBalanceInGwei, depositData.Amount)
+			require.Equal(t, spec_crypto.MIN_ACTIVATION_BALANCE, depositData.Amount)
 			require.Equal(t, hex.EncodeToString(test.expectedRoot), depositDataCLI.DepositDataRoot)
 			require.Equal(t, hex.EncodeToString(test.expectedSig), depositDataCLI.Signature, "0x")
 		})
@@ -411,4 +420,138 @@ func must[T any](v T, err error) T {
 		panic(err)
 	}
 	return v
+}
+
+func TestDKGFailWithOperatorsMisbehave(t *testing.T) {
+	err := logging.SetGlobalLogger("debug", "capital", "console", nil)
+	require.NoError(t, err)
+	logger := zap.L().Named("operator-tests")
+	ops := wire.OperatorsCLI{}
+	version := "test.version"
+	stubClient := &stubs.Client{
+		CallContractF: func(call ethereum.CallMsg) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	srv1 := test_utils.CreateTestOperatorFromFile(t, 1, "../../examples/operator1", version, operatorCert, operatorKey, stubClient)
+	srv2 := test_utils.CreateTestOperatorFromFile(t, 2, "../../examples/operator2", version, operatorCert, operatorKey, stubClient)
+	srv3 := test_utils.CreateTestOperatorFromFile(t, 3, "../../examples/operator3", version, operatorCert, operatorKey, stubClient)
+	srv4 := test_utils.CreateTestOperatorFromFile(t, 4, "../../examples/operator4", version, operatorCert, operatorKey, stubClient)
+
+	ops = append(
+		ops,
+		wire.OperatorCLI{Addr: srv1.HttpSrv.URL, ID: 1, PubKey: &srv1.PrivKey.PublicKey},
+		wire.OperatorCLI{Addr: srv2.HttpSrv.URL, ID: 2, PubKey: &srv2.PrivKey.PublicKey},
+		wire.OperatorCLI{Addr: srv3.HttpSrv.URL, ID: 3, PubKey: &srv3.PrivKey.PublicKey},
+		wire.OperatorCLI{Addr: srv4.HttpSrv.URL, ID: 4, PubKey: &srv4.PrivKey.PublicKey},
+	)
+	withdraw := common.HexToAddress("0x0000000000000000000000000000000000000009")
+	owner := common.HexToAddress("0x0000000000000000000000000000000000000007")
+	ids := []uint64{1, 2, 3, 4}
+	t.Run("operator cheat with deal bundle", func(t *testing.T) {
+		intr, err := initiator.New(ops, logger, "test.version", rootCert, false)
+		require.NoError(t, err)
+		id := spec.NewID()
+
+		ops, err := initiator.ValidatedOperatorData(ids, intr.Operators)
+		require.NoError(t, err)
+		threshold := utils.GetThreshold(ids)
+		init := &spec.Init{
+			Operators:             ops,
+			T:                     uint64(threshold),
+			WithdrawalCredentials: withdraw.Bytes(),
+			Fork:                  e2m_core.NetworkFromString("mainnet").GenesisForkVersion(),
+			Owner:                 owner,
+			Nonce:                 0,
+			Amount:                uint64(spec_crypto.MIN_ACTIVATION_BALANCE),
+		}
+
+		exchangeMsgs, _, err := intr.SendInitMsg(id, init, ops)
+		require.NoError(t, err)
+		pub, err := spec_crypto.EncodeRSAPublicKey(&intr.PrivateKey.PublicKey)
+		require.NoError(t, err)
+		instanceID, err := utils.GetInstanceIDfromMsg(init, id, pub)
+		require.NoError(t, err)
+		kyberMsgs, _, err := intr.SendExchangeMsgs(instanceID, exchangeMsgs, ops)
+		require.NoError(t, err)
+
+		tsp := &wire.SignedTransport{}
+		err = tsp.UnmarshalSSZ(kyberMsgs[1])
+		require.NoError(t, err)
+
+		kyberMsg := &wire.KyberMessage{}
+		err = kyberMsg.UnmarshalSSZ(tsp.Message.Data)
+		require.NoError(t, err)
+
+		// decode deal bundle
+		d, err := wire.DecodeDealBundle(kyberMsg.Data, kyber_bls12381.NewBLS12381Suite().G1().(kyber_dkg.Suite))
+		require.NoError(t, err)
+
+		// try to cheat
+		cheatDealShare, err := hex.DecodeString("a262a2a96d170658f68cf2450106949e92b9c415c3add2dbb8ce1a09886cf24f12f4f2ff1043b372090b06ce9a328a6f64b4279125902a244a22aa4ae30e16249186b1ae3a2c2c6a29634215a84e86fae66862013d8db1cdc930a8b1502750d8")
+		require.NoError(t, err)
+		d.Deals[0].EncryptedShare = cheatDealShare
+		bundle := &kyber_dkg.DealBundle{
+			DealerIndex: d.DealerIndex,
+			Deals:       d.Deals,
+			Public:      d.Public,
+			SessionID:   d.SessionID,
+			Signature:   d.Signature,
+		}
+
+		byts, err := wire.EncodeDealBundle(bundle)
+		require.NoError(t, err)
+
+		// send corrupted kyber message to get justification error from protocol
+		msg := &wire.KyberMessage{
+			Type: wire.KyberDealBundleMessageType,
+			Data: byts,
+		}
+		byts, err = msg.MarshalSSZ()
+		require.NoError(t, err)
+
+		trsp := &wire.Transport{
+			Type:       wire.KyberMessageType,
+			Identifier: instanceID,
+			Data:       byts,
+			Version:    intr.Version,
+		}
+		bts, err := trsp.MarshalSSZ()
+		require.NoError(t, err)
+
+		// Sign message with RSA private key
+		sign, err := srv1.Srv.State.Sign(bts)
+		require.NoError(t, err)
+
+		pubOp, err := spec_crypto.EncodeRSAPublicKey(&srv1.Srv.State.PrivateKey.PublicKey)
+		require.NoError(t, err)
+
+		signed := &wire.SignedTransport{
+			Message:   trsp,
+			Signer:    pubOp,
+			Signature: sign,
+		}
+		final, err := signed.MarshalSSZ()
+		kyberMsgs[srv1.ID] = final
+		require.NoError(t, err)
+
+		dkgResult, errs, err := intr.SendKyberMsgs(instanceID, kyberMsgs, ops)
+		require.NoError(t, err)
+
+		for _, err := range errs {
+			require.NoError(t, err)
+		}
+		var finalResults [][]byte
+		for _, res := range dkgResult {
+			finalResults = append(finalResults, res)
+		}
+
+		_, _, _, err = intr.CreateCeremonyResults(finalResults, instanceID, init.Operators, init.WithdrawalCredentials, nil, init.Fork, init.Owner, init.Nonce, phase0.Gwei(init.Amount))
+		require.ErrorContains(t, err, "protocol failed with response complaints")
+	})
+
+	srv1.HttpSrv.Close()
+	srv2.HttpSrv.Close()
+	srv3.HttpSrv.Close()
+	srv4.HttpSrv.Close()
 }

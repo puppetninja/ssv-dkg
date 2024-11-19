@@ -10,8 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
+	"github.com/ssvlabs/ssv-dkg/pkgs/crypto"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
 
 func TestKeysharesJSON(t *testing.T) {
@@ -108,6 +108,48 @@ func TestDepositDataJSON(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, len(depositDataArray), 1)
 			err = crypto.ValidateDepositDataCLI(depositDataArray[0], test.expectedWithdrawalCredentials)
+			if test.expectedErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), test.expectedErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestProofsJSON(t *testing.T) {
+	tests := []struct {
+		keyshareFile string
+		proofsFile   string
+		expectedErr  string
+	}{
+		{
+			keyshareFile: "testdata/results--valid-1/002731-0x864f476741fe922a195b97a200a8232a5396fd035597e8ba77ab18c2e5dfc4d66652e4e2975f0c605aa4ba4ecb2b1ecd/keyshares.json",
+			proofsFile:   "testdata/results--valid-1/002731-0x864f476741fe922a195b97a200a8232a5396fd035597e8ba77ab18c2e5dfc4d66652e4e2975f0c605aa4ba4ecb2b1ecd/proofs.json",
+			expectedErr:  "",
+		},
+	}
+
+	for _, test := range tests {
+		name, ok := strings.CutSuffix(filepath.Base(test.proofsFile), ".json")
+		if !ok {
+			t.Fatalf("invalid test filename: %s", test.proofsFile)
+		}
+		t.Run(name, func(t *testing.T) {
+			keyshares := &wire.KeySharesCLI{}
+			keysharesData, err := os.ReadFile(test.keyshareFile)
+			require.NoError(t, err)
+			err = json.Unmarshal(keysharesData, keyshares)
+			require.NoError(t, err)
+
+			proofs := []*wire.SignedProof{}
+			proofsData, err := os.ReadFile(test.proofsFile)
+			require.NoError(t, err)
+			err = json.Unmarshal(proofsData, &proofs)
+			require.NoError(t, err)
+
+			err = ValidateSignedProofs(keyshares, proofs)
 			if test.expectedErr != "" {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), test.expectedErr)

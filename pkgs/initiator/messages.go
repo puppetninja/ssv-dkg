@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
+	spec_crypto "github.com/ssvlabs/dkg-spec/crypto"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
 
 // standardMessageVerification creates function to verify each participating operator RSA signature for incoming to initiator messages
@@ -16,28 +16,27 @@ func standardMessageVerification(ops wire.OperatorsCLI) func(pk *rsa.PublicKey, 
 		op := ops.ByPubKey(pk)
 
 		if op == nil {
-			encodedPk, _ := crypto.EncodeRSAPublicKey(pk)
+			encodedPk, _ := spec_crypto.EncodeRSAPublicKey(pk)
 			return fmt.Errorf("cant find operator participating at DKG %s", string(encodedPk))
 		}
 
-		return crypto.VerifyRSA(pk, msg, sig)
+		return spec_crypto.VerifyRSA(pk, msg, sig)
 	}
 }
 
 // verifyMessageSignatures verifies incoming to initiator messages from operators.
 // Incoming message from operator should have same DKG ceremony ID and a valid signature
-func verifyMessageSignatures(id [24]byte, messages [][]byte, verify VerifyMessageSignatureFunc) error {
+func verifyMessageSignatures(id [24]byte, messages map[uint64][]byte, verify VerifyMessageSignatureFunc) error {
 	var errs error
-	for i := 0; i < len(messages); i++ {
-		msg := messages[i]
+	for _, msg := range messages {
 		tsp := &wire.SignedTransport{}
 		if err := tsp.UnmarshalSSZ(msg); err != nil {
-			errmsg, parseErr := wire.ParseAsError(msg)
-			if parseErr == nil {
-				errs = errors.Join(errs, fmt.Errorf("%v", errmsg))
-				continue
+			errString, err := wire.ParseAsError(msg)
+			if err != nil {
+				return fmt.Errorf("cant parse error message: %w", err)
 			}
-			return err
+			errs = errors.Join(errs, fmt.Errorf("%s", errString))
+			continue
 		}
 		signedBytes, err := tsp.Message.MarshalSSZ()
 		if err != nil {
@@ -48,7 +47,7 @@ func verifyMessageSignatures(id [24]byte, messages [][]byte, verify VerifyMessag
 			return fmt.Errorf("incoming message has wrong ID, aborting... operator %d, msg ID %x", tsp.Signer, tsp.Message.Identifier[:])
 		}
 		// Verification operator signatures
-		pk, err := crypto.ParseRSAPublicKey(tsp.Signer)
+		pk, err := spec_crypto.ParseRSAPublicKey(tsp.Signer)
 		if err != nil {
 			return fmt.Errorf("failed to parse RSA key: %w", err)
 		}
@@ -60,32 +59,33 @@ func verifyMessageSignatures(id [24]byte, messages [][]byte, verify VerifyMessag
 }
 
 // makeMultipleSignedTransports creates a one combined message from operators with initiator signature
-func makeMultipleSignedTransports(privateKey *rsa.PrivateKey, id [24]byte, messages [][]byte) (*wire.MultipleSignedTransports, error) {
+func makeMultipleSignedTransports(privateKey *rsa.PrivateKey, id [24]byte, messages map[uint64][]byte) (*wire.MultipleSignedTransports, error) {
 	// We are collecting responses at SendToAll which gives us int(msg)==int(oprators)
 	final := &wire.MultipleSignedTransports{
 		Identifier: id,
 		Messages:   make([]*wire.SignedTransport, len(messages)),
 	}
 	var allMsgsBytes []byte
-	for i := 0; i < len(messages); i++ {
-		msg := messages[i]
+	count := 0
+	for i, msg := range messages {
 		tsp := &wire.SignedTransport{}
 		if err := tsp.UnmarshalSSZ(msg); err != nil {
-			errmsg, parseErr := wire.ParseAsError(msg)
-			if parseErr == nil {
-				return nil, fmt.Errorf("msg %d returned: %v", i, errmsg)
+			errString, err := wire.ParseAsError(msg)
+			if err != nil {
+				return nil, fmt.Errorf("cant parse error message: %w", err)
 			}
-			return nil, err
+			return nil, fmt.Errorf("operator %d returned: %s", i, errString)
 		}
 		// Verify that incoming messages have valid DKG ceremony ID
 		if !bytes.Equal(id[:], tsp.Message.Identifier[:]) {
 			return nil, fmt.Errorf("incoming message has wrong ID, aborting... operator %d, msg ID %x", tsp.Signer, tsp.Message.Identifier[:])
 		}
-		final.Messages[i] = tsp
+		final.Messages[count] = tsp
 		allMsgsBytes = append(allMsgsBytes, msg...)
+		count++
 	}
 	// sign message by initiator
-	sig, err := crypto.SignRSA(privateKey, allMsgsBytes)
+	sig, err := spec_crypto.SignRSA(privateKey, allMsgsBytes)
 	if err != nil {
 		return nil, err
 	}

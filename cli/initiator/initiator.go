@@ -6,15 +6,16 @@ import (
 	"fmt"
 	"log"
 
+	e2m_core "github.com/bloxapp/eth2-key-manager/core"
 	"github.com/sourcegraph/conc/pool"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	e2m_core "github.com/bloxapp/eth2-key-manager/core"
-	cli_utils "github.com/bloxapp/ssv-dkg/cli/utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/initiator"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
+	spec "github.com/ssvlabs/dkg-spec"
+	"github.com/ssvlabs/ssv-dkg/cli/flags"
+	cli_utils "github.com/ssvlabs/ssv-dkg/cli/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/initiator"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 )
 
 func init() {
-	cli_utils.SetInitFlags(StartDKG)
+	flags.SetInitFlags(StartDKG)
 }
 
 var StartDKG = &cobra.Command{
@@ -37,13 +38,13 @@ var StartDKG = &cobra.Command{
 		██║  ██║██╔═██╗ ██║   ██║    ██║██║╚██╗██║██║   ██║   ██║██╔══██║   ██║   ██║   ██║██╔══██╗
 		██████╔╝██║  ██╗╚██████╔╝    ██║██║ ╚████║██║   ██║   ██║██║  ██║   ██║   ╚██████╔╝██║  ██║
 		╚═════╝ ╚═╝  ╚═╝ ╚═════╝     ╚═╝╚═╝  ╚═══╝╚═╝   ╚═╝   ╚═╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝`)
-		if err := cli_utils.SetViperConfig(cmd); err != nil {
+		if err := flags.SetViperConfig(cmd); err != nil {
 			return err
 		}
-		if err := cli_utils.BindInitFlags(cmd); err != nil {
+		if err := flags.BindInitFlags(cmd); err != nil {
 			return err
 		}
-		logger, err := cli_utils.SetGlobalLogger(cmd, "dkg-initiator")
+		logger, err := cli_utils.SetGlobalLogger(cmd, "dkg-initiator", flags.LogFilePath, flags.LogLevel, flags.LogFormat, flags.LogLevelFormat)
 		if err != nil {
 			return err
 		}
@@ -54,35 +55,34 @@ var StartDKG = &cobra.Command{
 		}()
 		logger.Info("🪛 Initiator`s", zap.String("Version", cmd.Version))
 		// Load operators TODO: add more sources.
-		operatorIDs, err := cli_utils.StingSliceToUintArray(cli_utils.OperatorIDs)
+		operatorIDs, err := cli_utils.StringSliceToUintArray(flags.OperatorIDs)
 		if err != nil {
-			logger.Fatal("😥 Failed to load participants: ", zap.Error(err))
+			logger.Fatal("😥 Failed to load operator IDs: ", zap.Error(err))
 		}
-		opMap, err := cli_utils.LoadOperators(logger)
+		opMap, err := cli_utils.LoadOperators(logger, flags.OperatorsInfo, flags.OperatorsInfoPath)
 		if err != nil {
 			logger.Fatal("😥 Failed to load operators: ", zap.Error(err))
 		}
-		logger.Info("🔑 opening initiator RSA private key file")
-		ethnetwork := e2m_core.MainNetwork
-		if cli_utils.Network != "now_test_network" {
-			ethnetwork = e2m_core.NetworkFromString(cli_utils.Network)
+		ethNetwork := e2m_core.NetworkFromString(flags.Network)
+		if ethNetwork == "" {
+			logger.Fatal("😥 Cant recognize eth network")
 		}
 		// start the ceremony
 		ctx := context.Background()
 		pool := pool.NewWithResults[*Result]().WithContext(ctx).WithFirstError().WithMaxGoroutines(maxConcurrency)
-		for i := 0; i < int(cli_utils.Validators); i++ {
+		for i := 0; i < int(flags.Validators); i++ {
 			i := i
 			pool.Go(func(ctx context.Context) (*Result, error) {
 				// Create new DKG initiator
-				dkgInitiator, err := initiator.New(opMap.Clone(), logger, cmd.Version, cli_utils.ClientCACertPath)
+				dkgInitiator, err := initiator.New(opMap.Clone(), logger, cmd.Version, flags.ClientCACertPath, flags.TLSInsecure)
 				if err != nil {
 					return nil, err
 				}
 				// Create a new ID.
-				id := crypto.NewID()
-				nonce := cli_utils.Nonce + uint64(i)
+				id := spec.NewID()
+				nonce := flags.Nonce + uint64(i)
 				// Perform the ceremony.
-				depositData, keyShares, proofs, err := dkgInitiator.StartDKG(id, cli_utils.WithdrawAddress.Bytes(), operatorIDs, ethnetwork, cli_utils.OwnerAddress, nonce)
+				depositData, keyShares, proofs, err := dkgInitiator.StartDKG(id, flags.WithdrawAddress.Bytes(), operatorIDs, ethNetwork, flags.OwnerAddress, nonce, flags.Amount)
 				if err != nil {
 					return nil, err
 				}
@@ -120,11 +120,11 @@ var StartDKG = &cobra.Command{
 			keySharesArr,
 			proofs,
 			false,
-			int(cli_utils.Validators),
-			cli_utils.OwnerAddress,
-			cli_utils.Nonce,
-			cli_utils.WithdrawAddress,
-			cli_utils.OutputPath,
+			int(flags.Validators),
+			flags.OwnerAddress,
+			flags.Nonce,
+			flags.WithdrawAddress,
+			flags.OutputPath,
 		); err != nil {
 			logger.Fatal("Could not save results", zap.Error(err))
 		}

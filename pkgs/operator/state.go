@@ -2,7 +2,7 @@ package operator
 
 import (
 	"bytes"
-	"crypto/rand"
+	"context"
 	"crypto/rsa"
 	"encoding/hex"
 	"encoding/json"
@@ -10,61 +10,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/drand/kyber"
 	kyber_bls12381 "github.com/drand/kyber-bls12381"
-	"github.com/ethereum/go-ethereum/common"
+	kyber_dkg "github.com/drand/kyber/share/dkg"
+	eth_common "github.com/ethereum/go-ethereum/common"
 	"go.uber.org/zap"
 
-	cli_utils "github.com/bloxapp/ssv-dkg/cli/utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/dkg"
-	"github.com/bloxapp/ssv-dkg/pkgs/utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
-	"github.com/bloxapp/ssv-dkg/spec"
-	"github.com/bloxapp/ssv/utils/rsaencryption"
+	spec "github.com/ssvlabs/dkg-spec"
+	spec_crypto "github.com/ssvlabs/dkg-spec/crypto"
+	"github.com/ssvlabs/dkg-spec/eip1271"
+	cli_utils "github.com/ssvlabs/ssv-dkg/cli/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/crypto"
+	"github.com/ssvlabs/ssv-dkg/pkgs/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
 
-const MaxInstances = 1024
-const MaxInstanceTime = 5 * time.Minute
-
-// Instance interface to process messages at DKG instances incoming from initiator
-type Instance interface {
-	Process(*wire.SignedTransport) error
-	ReadResponse() []byte
-	ReadError() error
-	VerifyInitiatorMessage(msg, sig []byte) error
-	GetLocalOwner() *dkg.LocalOwner
-}
-
-// instWrapper wraps LocalOwner instance with RSA public key
-type instWrapper struct {
-	*dkg.LocalOwner                   // main DKG ceremony instance
-	InitiatorPublicKey *rsa.PublicKey // initiator's RSA public key to verify its identity. Makes sure that in the DKG process messages received only from one initiator who started it.
-	respChan           chan []byte    // channel to receive response
-	errChan            chan error     // channel to receive error
-}
-
-// VerifyInitiatorMessage verifies initiator message signature
-func (iw *instWrapper) VerifyInitiatorMessage(msg, sig []byte) error {
-	pubKey, err := crypto.EncodeRSAPublicKey(iw.InitiatorPublicKey)
-	if err != nil {
-		return err
-	}
-	if err := crypto.VerifyRSA(iw.InitiatorPublicKey, msg, sig); err != nil {
-		return fmt.Errorf("failed to verify a message from initiator: %x", pubKey)
-	}
-	iw.Logger.Info("Successfully verified initiator message signature", zap.Uint64("from", iw.ID))
-	return nil
-}
-
-// ReadResponse reads from response channel
-func (iw *instWrapper) ReadResponse() []byte {
-	return <-iw.respChan
-}
-
-// ReadError reads from error channel
-func (iw *instWrapper) ReadError() error {
-	return <-iw.errChan
-}
+const MaxInstances = 1024 * 100
+const MaxInstanceTime = 1 * time.Minute
 
 // InstanceID each new DKG ceremony has a unique random ID that we can identify messages and be able to process them in parallel
 type InstanceID [24]byte
@@ -79,66 +41,65 @@ type Switch struct {
 	Version          []byte
 	PubKeyBytes      []byte
 	OperatorID       uint64
+	EthClient        eip1271.ETHClient
 }
 
-// CreateInstance creates a LocalOwner instance with the DKG ceremony ID, that we can identify it later. Initiator public key identifies an initiator for
-// new instance. There cant be two instances with the same ID, but one initiator can start several DKG ceremonies.
-func (s *Switch) CreateInstance(reqID [24]byte, init *wire.Init, initiatorPublicKey *rsa.PublicKey) (Instance, []byte, error) {
-	operatorID, err := spec.OperatorIDByPubKey(init.Operators, s.PubKeyBytes)
-	if err != nil {
-		return nil, nil, err
+func (s *Switch) getPublicCommitsAndSecretShare(reshareMsg *wire.ReshareMessage) ([]kyber.Point, *kyber_dkg.DistKeyShare, error) {
+	// sanity check for incoming proofs len
+	if len(reshareMsg.Proofs) != len(reshareMsg.Reshare.OldOperators) {
+		return nil, nil, fmt.Errorf("wrong proofs len at reshare message: expected %d, got %d", len(reshareMsg.Reshare.OldOperators), len(reshareMsg.Proofs))
 	}
-	// sanity check of operator ID
-	if s.OperatorID != operatorID {
-		return nil, nil, fmt.Errorf("wrong operator ID")
-	}
-	bchan := make(chan []byte, 1)
-	broadcast := func(msg []byte) error {
-		bchan <- msg
-		return nil
-	}
-	opts := dkg.OwnerOpts{
-		Logger:             s.Logger.With(zap.String("instance", hex.EncodeToString(reqID[:]))),
-		BroadcastF:         broadcast,
-		Signer:             spec.RSASigner(s.PrivateKey),
-		EncryptFunc:        s.Encrypt,
-		DecryptFunc:        s.Decrypt,
-		Suite:              kyber_bls12381.NewBLS12381Suite(),
-		ID:                 operatorID,
-		InitiatorPublicKey: initiatorPublicKey,
-		OperatorPublicKey:  &s.PrivateKey.PublicKey,
-		Version:            s.Version,
-	}
-	owner := dkg.New(&opts)
 	// wait for exchange msg
-	resp, err := owner.Init(reqID, init)
+	commits, err := crypto.GetPubCommitsFromProofs(reshareMsg.Reshare.OldOperators, reshareMsg.Proofs, int(reshareMsg.Reshare.OldT))
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := owner.Broadcast(resp); err != nil {
-		return nil, nil, err
+	var distKeyShare *kyber_dkg.DistKeyShare
+	for i, op := range reshareMsg.Reshare.OldOperators {
+		if op.ID != s.OperatorID {
+			continue
+		}
+		op := &spec.Operator{
+			ID:     s.OperatorID,
+			PubKey: s.PubKeyBytes,
+		}
+		if err := spec.ValidateReshareMessage(reshareMsg.Reshare, op, reshareMsg.Proofs[i]); err != nil {
+			return nil, nil, err
+		}
+		secretShare, err := crypto.GetSecretShareFromProofs(reshareMsg.Proofs[i], s.PrivateKey, s.OperatorID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if secretShare == nil {
+			return nil, nil, fmt.Errorf("cant decrypt incoming private share")
+		}
+		distKeyShare = &kyber_dkg.DistKeyShare{
+			Commits: commits,
+			Share:   secretShare,
+		}
+		suite := kyber_bls12381.NewBLS12381Suite()
+		valPK, err := crypto.ResultToValidatorPK(distKeyShare, suite.G1().(kyber_dkg.Suite))
+		if err != nil {
+			return nil, nil, err
+		}
+		if !bytes.Equal(valPK.Serialize(), reshareMsg.Reshare.ValidatorPubKey) {
+			return nil, nil, fmt.Errorf("validator pub key recovered from proofs not equal validator pub key at reshare msg")
+		}
+		secretKeyBLS, err := crypto.ResultToShareSecretKey(distKeyShare)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get BLS partial secret key share: %w", err)
+		}
+		if !bytes.Equal(secretKeyBLS.GetPublicKey().Serialize(), reshareMsg.Proofs[i].Proof.SharePubKey) {
+			return nil, nil, fmt.Errorf("share pub key recovered from proofs not equal share pub key at reshare msg")
+		}
+		s.Logger.Info("Successfully recovered secret share from proofs")
+
 	}
-	res := <-bchan
-	return &instWrapper{owner, initiatorPublicKey, bchan, owner.ErrorChan}, res, nil
-}
-
-// Sign creates a RSA signature for the message at operator before sending it to initiator
-func (s *Switch) Sign(msg []byte) ([]byte, error) {
-	return crypto.SignRSA(s.PrivateKey, msg)
-}
-
-// Encrypt with RSA public key private DKG share key
-func (s *Switch) Encrypt(msg []byte) ([]byte, error) {
-	return rsa.EncryptPKCS1v15(rand.Reader, &s.PrivateKey.PublicKey, msg)
-}
-
-// Decrypt with RSA private key private DKG share key
-func (s *Switch) Decrypt(ciphertext []byte) ([]byte, error) {
-	return rsaencryption.DecodeKey(s.PrivateKey, ciphertext)
+	return commits, distKeyShare, err
 }
 
 // NewSwitch creates a new Switch
-func NewSwitch(pv *rsa.PrivateKey, logger *zap.Logger, ver, pkBytes []byte, id uint64) *Switch {
+func NewSwitch(pv *rsa.PrivateKey, logger *zap.Logger, ver, pkBytes []byte, id uint64, ethClient eip1271.ETHClient) *Switch {
 	return &Switch{
 		Logger:           logger,
 		Mtx:              sync.RWMutex{},
@@ -148,79 +109,8 @@ func NewSwitch(pv *rsa.PrivateKey, logger *zap.Logger, ver, pkBytes []byte, id u
 		Version:          ver,
 		PubKeyBytes:      pkBytes,
 		OperatorID:       id,
+		EthClient:        ethClient,
 	}
-}
-
-// InitInstance creates a LocalOwner instance and DKG public key message (Exchange)
-func (s *Switch) InitInstance(reqID [24]byte, initMsg *wire.Transport, initiatorPub, initiatorSignature []byte) ([]byte, error) {
-	if !bytes.Equal(initMsg.Version, s.Version) {
-		return nil, fmt.Errorf("wrong version: remote %s local %s", initMsg.Version, s.Version)
-	}
-	logger := s.Logger.With(zap.String("reqid", hex.EncodeToString(reqID[:])))
-	logger.Info("🚀 Initializing DKG instance")
-	init := &wire.Init{}
-	if err := init.UnmarshalSSZ(initMsg.Data); err != nil {
-		return nil, fmt.Errorf("init: failed to unmarshal init message: %s", err.Error())
-	}
-	if err := spec.ValidateInitMessage(init); err != nil {
-		return nil, err
-	}
-	// Check that incoming message signature is valid
-	initiatorPubKey, err := crypto.ParseRSAPublicKey(initiatorPub)
-	if err != nil {
-		return nil, fmt.Errorf("init: failed parse initiator public key: %s", err.Error())
-	}
-	marshalledWireMsg, err := initMsg.MarshalSSZ()
-	if err != nil {
-		return nil, fmt.Errorf("init: failed to marshal transport message: %s", err.Error())
-	}
-	err = crypto.VerifyRSA(initiatorPubKey, marshalledWireMsg, initiatorSignature)
-	if err != nil {
-		return nil, fmt.Errorf("init: initiator signature isn't valid: %s", err.Error())
-	}
-	s.Logger.Info("✅ init message signature is successfully verified", zap.String("from initiator", fmt.Sprintf("%x", initiatorPubKey.N.Bytes())))
-	s.Mtx.Lock()
-	l := len(s.Instances)
-	if l >= MaxInstances {
-		cleaned := s.CleanInstances()
-		if l-cleaned >= MaxInstances {
-			s.Mtx.Unlock()
-			return nil, utils.ErrMaxInstances
-		}
-	}
-	_, ok := s.Instances[reqID]
-	if ok {
-		tm := s.InstanceInitTime[reqID]
-		if time.Now().Before(tm.Add(MaxInstanceTime)) {
-			s.Mtx.Unlock()
-			return nil, utils.ErrAlreadyExists
-		}
-		delete(s.Instances, reqID)
-		delete(s.InstanceInitTime, reqID)
-	}
-	s.Mtx.Unlock()
-	inst, resp, err := s.CreateInstance(reqID, init, initiatorPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("init: failed to create instance: %s", err.Error())
-	}
-	s.Mtx.Lock()
-	s.Instances[reqID] = inst
-	s.InstanceInitTime[reqID] = time.Now()
-	s.Mtx.Unlock()
-	return resp, nil
-}
-
-// CleanInstances removes all instances at Switch
-func (s *Switch) CleanInstances() int {
-	count := 0
-	for id, instime := range s.InstanceInitTime {
-		if time.Now().After(instime.Add(MaxInstanceTime)) {
-			delete(s.Instances, id)
-			delete(s.InstanceInitTime, id)
-			count++
-		}
-	}
-	return count
 }
 
 // ProcessMessage processes incoming message to /dkg route
@@ -229,7 +119,7 @@ func (s *Switch) ProcessMessage(dkgMsg []byte) ([]byte, error) {
 	st := &wire.MultipleSignedTransports{}
 	err := st.UnmarshalSSZ(dkgMsg)
 	if err != nil {
-		return nil, fmt.Errorf("process message: failed to unmarshal dkg message: %s", err.Error())
+		return nil, fmt.Errorf("failed to ssz unmarshal message: probably an upgrade to latest version needed: %w", err)
 	}
 
 	id := InstanceID(st.Identifier)
@@ -241,28 +131,7 @@ func (s *Switch) ProcessMessage(dkgMsg []byte) ([]byte, error) {
 	if !ok {
 		return nil, utils.ErrMissingInstance
 	}
-	var mltplMsgsBytes []byte
-	for _, ts := range st.Messages {
-		tsBytes, err := ts.MarshalSSZ()
-		if err != nil {
-			return nil, fmt.Errorf("process message: failed to marshal message: %s", err.Error())
-		}
-		mltplMsgsBytes = append(mltplMsgsBytes, tsBytes...)
-	}
-	// Verify initiator signature
-	err = inst.VerifyInitiatorMessage(mltplMsgsBytes, st.Signature)
-	if err != nil {
-		return nil, fmt.Errorf("process message: failed to verify initiator signature: %s", err.Error())
-	}
-	for _, ts := range st.Messages {
-		err = inst.Process(ts)
-		if err != nil {
-			return nil, fmt.Errorf("process message: failed to process dkg message: %s", err.Error())
-		}
-	}
-	resp := inst.ReadResponse()
-
-	return resp, nil
+	return inst.ProcessMessages(st)
 }
 
 func (s *Switch) MarshallAndSign(msg wire.SSZMarshaller, msgType wire.TransportType, operatorID uint64, id [24]byte) ([]byte, error) {
@@ -297,9 +166,16 @@ func (s *Switch) MarshallAndSign(msg wire.SSZMarshaller, msgType wire.TransportT
 }
 
 func (s *Switch) Pong() ([]byte, error) {
+	var connected bool
+	latestBlock, err := s.EthClient.BlockNumber(context.Background())
+	if latestBlock > 0 && err == nil {
+		connected = true
+	}
 	pong := &wire.Pong{
-		ID:     s.OperatorID,
-		PubKey: s.PubKeyBytes,
+		ID:                 s.OperatorID,
+		PubKey:             s.PubKeyBytes,
+		Multisig:           true,
+		EthClientConnected: connected,
 	}
 	return s.MarshallAndSign(pong, wire.PongMessageType, s.OperatorID, [24]byte{})
 }
@@ -308,7 +184,7 @@ func (s *Switch) SaveResultData(incMsg *wire.SignedTransport, outputPath string)
 	resData := &wire.ResultData{}
 	err := resData.UnmarshalSSZ(incMsg.Message.Data)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to ssz unmarshal message: probably an upgrade to latest version needed: %w", err)
 	}
 	_, err = s.VerifyIncomingMessage(incMsg)
 	if err != nil {
@@ -338,10 +214,10 @@ func (s *Switch) SaveResultData(incMsg *wire.SignedTransport, outputPath string)
 	proofsArr := [][]*wire.SignedProof{proof}
 	withdrawCreds, err := hex.DecodeString(depJson.WithdrawalCredentials)
 	if err != nil {
-		return fmt.Errorf("failed to decode withdrawal credentials: %s", err.Error())
+		return fmt.Errorf("failed to decode withdrawal credentials: %w", err)
 	}
 	withdrawPrefix, withdrawAddress := crypto.ParseWithdrawalCredentials(withdrawCreds)
-	if withdrawPrefix != crypto.ETH1WithdrawalPrefixByte {
+	if withdrawPrefix != spec_crypto.ETH1WithdrawalPrefixByte {
 		return fmt.Errorf("invalid withdrawal prefix: %x", withdrawPrefix)
 	}
 	return cli_utils.WriteResults(
@@ -351,9 +227,9 @@ func (s *Switch) SaveResultData(incMsg *wire.SignedTransport, outputPath string)
 		proofsArr,
 		true,
 		1,
-		common.HexToAddress(keySharesArr[0].Shares[0].OwnerAddress),
-		keySharesArr[0].Shares[0].OwnerNonce,
-		common.BytesToAddress(withdrawAddress),
+		eth_common.HexToAddress(keySharesArr[0].Shares[0].ShareData.OwnerAddress),
+		keySharesArr[0].Shares[0].ShareData.OwnerNonce,
+		eth_common.BytesToAddress(withdrawAddress),
 		outputPath,
 	)
 }
@@ -365,7 +241,7 @@ func (s *Switch) VerifyIncomingMessage(incMsg *wire.SignedTransport) (uint64, er
 
 	resData := &wire.ResultData{}
 	if err := resData.UnmarshalSSZ(incMsg.Message.Data); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to ssz unmarshal message: probably an upgrade to latest version needed: %w", err)
 	}
 	s.Mtx.RLock()
 	inst, ok := s.Instances[resData.Identifier]
@@ -388,16 +264,4 @@ func (s *Switch) VerifyIncomingMessage(incMsg *wire.SignedTransport) (uint64, er
 		return 0, err
 	}
 	return operatorID, nil
-}
-
-func (s *Switch) VerifySig(incMsg *wire.SignedTransport, initiatorPubKey *rsa.PublicKey) error {
-	marshalledWireMsg, err := incMsg.Message.MarshalSSZ()
-	if err != nil {
-		return err
-	}
-	err = crypto.VerifyRSA(initiatorPubKey, marshalledWireMsg, incMsg.Signature)
-	if err != nil {
-		return fmt.Errorf("signature isn't valid: %s", err.Error())
-	}
-	return nil
 }

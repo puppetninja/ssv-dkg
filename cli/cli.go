@@ -6,9 +6,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/bloxapp/ssv-dkg/cli/initiator"
-	"github.com/bloxapp/ssv-dkg/cli/operator"
-	"github.com/bloxapp/ssv-dkg/cli/verify"
+	"github.com/ssvlabs/ssv-dkg/cli/initiator"
+	"github.com/ssvlabs/ssv-dkg/cli/operator"
+	"github.com/ssvlabs/ssv-dkg/cli/verify"
 )
 
 func init() {
@@ -16,6 +16,10 @@ func init() {
 	RootCmd.AddCommand(operator.StartDKGOperator)
 	RootCmd.AddCommand(initiator.HealthCheck)
 	RootCmd.AddCommand(verify.Verify)
+	RootCmd.AddCommand(initiator.GenerateResignMsg)
+	RootCmd.AddCommand(initiator.StartResigning)
+	RootCmd.AddCommand(initiator.GenerateReshareMsg)
+	RootCmd.AddCommand(initiator.StartReshare)
 }
 
 // RootCmd represents the root command of DKG-tool CLI
@@ -32,6 +36,10 @@ func Execute(appName, version string) {
 	RootCmd.Version = version
 	initiator.HealthCheck.Version = version
 	initiator.StartDKG.Version = version
+	initiator.GenerateResignMsg.Version = version
+	initiator.StartResigning.Version = version
+	initiator.GenerateReshareMsg.Version = version
+	initiator.StartReshare.Version = version
 	operator.StartDKGOperator.Version = version
 	if err := RootCmd.Execute(); err != nil {
 		log.Fatal("failed to execute root command", zap.Error(err))

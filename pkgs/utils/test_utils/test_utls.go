@@ -18,12 +18,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/bloxapp/ssv-dkg/pkgs/crypto"
-	"github.com/bloxapp/ssv-dkg/pkgs/operator"
-	"github.com/bloxapp/ssv-dkg/pkgs/utils"
-	"github.com/bloxapp/ssv-dkg/pkgs/wire"
 	"github.com/bloxapp/ssv/logging"
 	"github.com/bloxapp/ssv/utils/rsaencryption"
+	spec_crypto "github.com/ssvlabs/dkg-spec/crypto"
+	"github.com/ssvlabs/dkg-spec/testing/stubs"
+	"github.com/ssvlabs/ssv-dkg/pkgs/crypto"
+	"github.com/ssvlabs/ssv-dkg/pkgs/operator"
+	"github.com/ssvlabs/ssv-dkg/pkgs/utils"
+	"github.com/ssvlabs/ssv-dkg/pkgs/wire"
 )
 
 type TestOperator struct {
@@ -33,22 +35,27 @@ type TestOperator struct {
 	Srv     *operator.Server
 }
 
-func CreateTestOperatorFromFile(t *testing.T, id uint64, examplePath, version, operatorCert, operatorKey string) *TestOperator {
+func CreateTestOperatorFromFile(t *testing.T, id uint64, opPath, version, operatorCert, operatorKey string, stubClient *stubs.Client) *TestOperator {
 	err := logging.SetGlobalLogger("info", "capital", "console", nil)
 	require.NoError(t, err)
 	logger := zap.L().Named("operator-tests")
-	privKey, err := os.ReadFile(filepath.Clean(examplePath + "operator" + fmt.Sprintf("%v", id) + "/encrypted_private_key.json"))
+	privKey, err := os.ReadFile(filepath.Clean(opPath + "/encrypted_private_key.json"))
 	if err != nil {
 		logger.Fatal("failed to read file", zap.Error(err))
 		return nil
 	}
-	priv, err := crypto.DecryptRSAKeystore(privKey, "12345678")
+	pass, err := os.ReadFile(filepath.Clean(opPath + "/password"))
+	if err != nil {
+		logger.Fatal("failed to read file", zap.Error(err))
+		return nil
+	}
+	priv, err := crypto.DecryptRSAKeystore(privKey, string(pass))
 	require.NoError(t, err)
 	r := chi.NewRouter()
 	operatorPubKey := priv.Public().(*rsa.PublicKey)
-	pkBytes, err := crypto.EncodeRSAPublicKey(operatorPubKey)
+	pkBytes, err := spec_crypto.EncodeRSAPublicKey(operatorPubKey)
 	require.NoError(t, err)
-	swtch := operator.NewSwitch(priv, logger, []byte(version), pkBytes, id)
+	swtch := operator.NewSwitch(priv, logger, []byte(version), pkBytes, id, stubClient)
 	tempDir, err := os.MkdirTemp("", "dkg")
 	require.NoError(t, err)
 	s := &operator.Server{
@@ -68,7 +75,7 @@ func CreateTestOperatorFromFile(t *testing.T, id uint64, examplePath, version, o
 	}
 }
 
-func CreateTestOperator(t *testing.T, id uint64, version, operatorCert, operatorKey string) *TestOperator {
+func CreateTestOperator(t *testing.T, id uint64, version, operatorCert, operatorKey string, stubClient *stubs.Client) *TestOperator {
 	err := logging.SetGlobalLogger("info", "capital", "console", nil)
 	require.NoError(t, err)
 	logger := zap.L().Named("integration-tests")
@@ -79,9 +86,9 @@ func CreateTestOperator(t *testing.T, id uint64, version, operatorCert, operator
 	r := chi.NewRouter()
 	require.NoError(t, err)
 	operatorPubKey := priv.Public().(*rsa.PublicKey)
-	pkBytes, err := crypto.EncodeRSAPublicKey(operatorPubKey)
+	pkBytes, err := spec_crypto.EncodeRSAPublicKey(operatorPubKey)
 	require.NoError(t, err)
-	swtch := operator.NewSwitch(priv, logger, []byte(version), pkBytes, id)
+	swtch := operator.NewSwitch(priv, logger, []byte(version), pkBytes, id, stubClient)
 	tempDir, err := os.MkdirTemp("", "dkg")
 	require.NoError(t, err)
 	s := &operator.Server{
@@ -145,7 +152,7 @@ func VerifySharesData(ids []uint64, keys []*rsa.PrivateKey, ks *wire.KeySharesCL
 			return err
 		}
 	}
-	recon, err := crypto.RecoverBLSSignature(ids, deserializedSigs2)
+	recon, err := spec_crypto.RecoverBLSSignature(ids, deserializedSigs2)
 	if err != nil {
 		return err
 	}

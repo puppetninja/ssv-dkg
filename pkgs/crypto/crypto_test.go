@@ -10,13 +10,13 @@ import (
 	"github.com/drand/kyber/pairing"
 	"github.com/drand/kyber/share"
 	"github.com/drand/kyber/share/dkg"
-	drand_bls "github.com/drand/kyber/sign/bls" //nolint:all
+	drand_bls "github.com/drand/kyber/sign/bdn"
 	"github.com/drand/kyber/sign/tbls"
 	"github.com/drand/kyber/util/random"
 	"github.com/herumi/bls-eth-go-binary/bls"
 	"github.com/stretchr/testify/require"
 
-	"github.com/bloxapp/ssv-spec/types"
+	"github.com/ssvlabs/ssv-spec/types"
 )
 
 func TestDKGFull(t *testing.T) {
@@ -71,9 +71,9 @@ func testResults(t *testing.T, suite pairing.Suite, thr, n int, results []*dkg.R
 
 	secretPoly, err := share.RecoverPriPoly(suite.G1(), shares, thr, n)
 	coefs := secretPoly.Coefficients()
-	t.Logf("Ploly len %d", len(coefs))
+	t.Logf("Poly len %d", len(coefs))
 	for _, c := range coefs {
-		t.Logf("Ploly coef %s", c.String())
+		t.Logf("Poly coef %s", c.String())
 	}
 	require.NoError(t, err)
 	gotPub := secretPoly.Commit(suite.G1().Point().Base())
