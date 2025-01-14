@@ -287,13 +287,16 @@ func (c *Initiator) ReshareMessageFlowHandling(id [24]byte, signedReshare *wire.
 		reqIDs = append(reqIDs, msgID)
 	}
 	c.Logger.Info("sending signed reshare message to all operators")
-	var errs map[uint64]error
-	exchangeMsgs, errs, err := c.SendReshareMsg(id, signedReshare, allOps)
+	var initErrs map[uint64]error
+	exchangeMsgs, initErrs, err := c.SendReshareMsg(id, signedReshare, allOps)
 	if err != nil {
 		return nil, err
 	}
+	if len(initErrs) > 0 {
+		allOps = filterOpsWithErrors(allOps, initErrs)
+	}
 	// check that all new operators and threshold of old operators replied without errors
-	if err := checkThreshold(exchangeMsgs, errs, signedReshare.Messages[0].Reshare.OldOperators, signedReshare.Messages[0].Reshare.NewOperators, int(signedReshare.Messages[0].Reshare.OldT)); err != nil {
+	if err := checkThreshold(exchangeMsgs, initErrs, signedReshare.Messages[0].Reshare.OldOperators, signedReshare.Messages[0].Reshare.NewOperators, int(signedReshare.Messages[0].Reshare.OldT)); err != nil {
 		return nil, err
 	}
 	numOfCeremonies := len(signedReshare.Messages)
@@ -309,7 +312,7 @@ func (c *Initiator) ReshareMessageFlowHandling(id [24]byte, signedReshare *wire.
 		}
 		allResults[operatorID] = allRes
 	}
-	// Operators have created instances of all ceremonies and sent back all exhcnage messages to initiator
+	// Operators have created instances of all ceremonies and sent back all exchange messages to initiator
 	c.Logger.Info("received exchange message responses for all ceremonies")
 	c.Logger.Info("continuing with all ceremonies one by one")
 	// finalResults contains result bytes for each operator for each ceremony
@@ -327,6 +330,10 @@ func (c *Initiator) ReshareMessageFlowHandling(id [24]byte, signedReshare *wire.
 		kyberMsgs, errs, err := c.SendExchangeMsgs(reqID, instanceExchangeMsgs, allOps)
 		if err != nil {
 			return nil, err
+		}
+		// merge errors from init phase
+		for k, v := range initErrs {
+			errs[k] = v
 		}
 		// check that all new operators and threshold of old operators replied without errors
 		if err := checkThreshold(kyberMsgs, errs, signedReshare.Messages[0].Reshare.OldOperators, signedReshare.Messages[0].Reshare.NewOperators, int(signedReshare.Messages[0].Reshare.OldT)); err != nil {
@@ -1023,4 +1030,15 @@ func verifyMessageType(tsp *wire.SignedTransport, expectedType wire.TransportTyp
 		}
 	}
 	return nil
+}
+
+// The returned slice contains only those operators without errors.
+func filterOpsWithErrors(allOps []*spec.Operator, initErrs map[uint64]error) []*spec.Operator {
+	filteredOps := make([]*spec.Operator, 0, len(allOps))
+	for _, op := range allOps {
+		if _, found := initErrs[op.ID]; !found {
+			filteredOps = append(filteredOps, op)
+		}
+	}
+	return filteredOps
 }
